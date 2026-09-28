@@ -7,13 +7,17 @@ import { createRenderQuality } from './render-quality.js';
 import { createPrintIntro, loadPrintSamples } from './print-intro.js';
 import { createFocusNoise, loadFocusSamples } from './focus-noise.js';
 import { PARTS } from './parts.js';
+import { prepareExplodeLayout, configureExplodeOrbit, applyExplodeLayout, captureAssemblyLayout, applyAssemblyLayout } from './explode-layout.js';
+import { RESET_GROW_MS } from './print-effect.js';
+import { createRenderBudget } from './render-budget.js';
+import { createPartPicker } from './part-picker.js';
 import './style.css';
 
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const modelURL = `${import.meta.env.BASE_URL}models/tennis-shoe-preview.glb`;
-const state = { ready: false, printing: false, amount: 0, target: 0, transition: null, width: 1, height: 1, selected: null };
+const state = { ready: false, printing: false, resetting: false, resetProgress: 1, amount: 0, target: 0, transition: null, width: 1, height: 1, selected: null };
 // A development-only frozen frame for reviewing the time-based reveal.
 const reviewProgress = import.meta.env.DEV && new URLSearchParams(location.search).has('introAt')
   ? THREE.MathUtils.clamp(Number(new URLSearchParams(location.search).get('introAt')) || 0, 0, 0.99) : null;
@@ -67,9 +71,11 @@ async function init() {
 
   createStudio(scene, renderer);
 
+  const renderBudget = createRenderBudget(renderer, devicePixelRatio);
   const meshes = [];
   const callouts = [];
   const raycaster = new THREE.Raycaster();
+  let partPicker = null;
   const ndc = new THREE.Vector2();
   let rotationTween = null;
   let fitTween = null;
@@ -82,12 +88,13 @@ async function init() {
   let lastFocusFrame = 0;
   let frameBudget = 0;
   let lastCalloutTime = 0;
-  let introBottom = 220;
+  let lastDiagnosticsTime = 0;
   let highDetailPromise = null;
   let highDetail = null;
   let renderCount = 0;
   let quality = null;
   let focusNoise = null;
+  let constellationTime = 0;
   let lastMotionTime = -Infinity;
   let coast = null;
   const dragSphere = new THREE.Spherical();
@@ -143,8 +150,8 @@ async function init() {
   function fitDistance(amount) {
     const aspect = state.width / state.height;
     const mobile = state.width <= 600;
-    const width = mobile ? THREE.MathUtils.lerp(4.6, 7.4, amount) : THREE.MathUtils.lerp(5.35, 7.8, amount);
-    const height = THREE.MathUtils.lerp(mobile ? 4.2 : 3.1, mobile ? 9.5 : 9.4, amount);
+    const width = mobile ? THREE.MathUtils.lerp(4.6, 10.8, amount) : THREE.MathUtils.lerp(5.35, 11.4, amount);
+    const height = THREE.MathUtils.lerp(mobile ? 4.2 : 3.1, mobile ? 10.6 : 10.5, amount);
     return Math.max(height, width / aspect) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
   }
   function preferredTarget(amount) {
@@ -153,6 +160,16 @@ async function init() {
   }
   function fitView(animated = false) {
     coast = null;
+    if (state.resetting) {
+      if (fitTween?.rebuild) {
+        const from = state.transition?.from ?? 0;
+        fitTween.fromTarget.copy(preferredTarget(from));
+        fitTween.fromPos.copy(originalDirection).multiplyScalar(fitDistance(from)).add(fitTween.fromTarget);
+        fitTween.toTarget.copy(preferredTarget(0));
+        fitTween.toPos.copy(originalDirection).multiplyScalar(fitDistance(0)).add(fitTween.toTarget);
+      }
+      return;
+    }
     if (state.selected) { focusPart(state.selected, animated); return; }
     const newTarget = preferredTarget(state.target);
     const direction = camera.position.clone().sub(controls.target).normalize();
@@ -165,11 +182,10 @@ async function init() {
   }
   function resize() {
     state.width = stage.clientWidth; state.height = stage.clientHeight;
+    renderBudget.resize(state.width, state.height);
     camera.aspect = state.width / state.height; camera.updateProjectionMatrix();
     if (!state.printing) renderer.setPixelRatio(restingPixelRatio());
     renderer.setSize(state.width, state.height);
-    const intro = document.querySelector('.intro');
-    if (!state.selected) introBottom = intro.offsetTop + intro.offsetHeight + 22;
     renderDirty = true;
     fitView(false);
   }
@@ -178,24 +194,24 @@ async function init() {
 
   function updateUI() {
     const p = Math.round(state.amount * 100);
-    document.body.dataset.view = state.amount === 0 ? 'assembled' : state.amount === 1 ? 'exploded' : 'transitioning';
-    document.body.dataset.explode = String(p);
-    $('replay-intro').hidden = state.amount > 0 || state.target > 0;
+    const view = state.amount === 0 ? 'assembled' : state.amount === 1 ? 'exploded' : 'transitioning';
+    if (document.body.dataset.view !== view) document.body.dataset.view = view;
+    if (document.body.dataset.explode !== String(p)) document.body.dataset.explode = String(p);
+    const hideReplay = state.amount > 0 || state.target > 0 || state.resetting;
+    if ($('replay-intro').hidden !== hideReplay) $('replay-intro').hidden = hideReplay;
   }
   function setAmount(amount) {
     state.amount = THREE.MathUtils.clamp(amount, 0, 1);
     for (const mesh of meshes) {
-      const [a, b] = mesh.userData.phase;
-      const local = THREE.MathUtils.clamp((state.amount - a) / (b - a), 0, 1);
-      const eased = local * local * (3 - 2 * local);
-      mesh.position.copy(mesh.userData.basePosition).addScaledVector(mesh.userData.explodeOffset, eased);
+      applyExplodeLayout(mesh, state.amount, constellationTime);
     }
     renderDirty = true;
     renderer.shadowMap.needsUpdate = true;
     updateUI();
+    if (state.amount === 0) constellationTime = 0;
   }
   function moveTo(target, immediate = false) {
-    if (!state.ready || state.printing) return;
+    if (!state.ready || state.printing || state.resetting) return;
     state.target = THREE.MathUtils.clamp(target, 0, 1);
     $('part-label').style.display = 'none';
     if (immediate || reduceMotion) { state.transition = null; setAmount(state.target); }
@@ -341,6 +357,7 @@ async function init() {
     $('inspection').hidden = false;
     $('part-label').style.display = 'none';
     document.body.dataset.selected = mesh.userData.part_id;
+    updateCallouts();
     $('announcement').textContent = focusNoise?.forming
       ? `正在由下向上生成${mesh.userData.label}，以开场动画的两倍速度成型。`
       : `正在查看${mesh.userData.label}，其他零件以生长噪波粒子呈现。`;
@@ -368,6 +385,7 @@ async function init() {
     state.selected = null; materialsForFocus(null);
     $('inspection').hidden = true;
     delete document.body.dataset.selected;
+    updateCallouts();
   }
   function createCallout(mesh, index) {
     const svgNS = 'http://www.w3.org/2000/svg';
@@ -396,54 +414,42 @@ async function init() {
     }
     callouts.push({ mesh, group, line, dot, button, anchor, side: ['part_03','part_04','part_05','part_06','part_11'].includes(mesh.userData.part_id) ? 'left' : 'right', index });
   }
+  const calloutPoint = new THREE.Vector3();
+  let labeledMesh = null;
   function updateCallouts() {
-    const visible = state.amount > 0.03;
-    $('callouts').hidden = !visible;
-    if (!visible) return;
+    const selected = !state.resetting && state.amount > .999 ? state.selected : null;
+    $('callouts').hidden = !selected;
+    if (labeledMesh !== selected) {
+      for (const item of callouts) {
+        item.button.hidden = item.mesh !== selected;
+        item.group.style.display = item.mesh === selected ? '' : 'none';
+      }
+      labeledMesh = selected;
+    }
+    if (!selected) return;
+    const item = callouts.find(item => item.mesh === selected);
     const mobile = state.width <= 600;
     const width = mobile ? 109 : 150;
-    const leftX = mobile ? 12 : Math.max(32, state.width * 0.16 - 90);
-    const rightX = mobile ? state.width - width - 12 : Math.min(state.width - width - 32, state.width * 0.79);
-    const point = new THREE.Vector3();
-    const layout = { left: [], right: [] };
-    scene.updateMatrixWorld(true);
+    selected.updateWorldMatrix(true, false);
+    calloutPoint.copy(item.anchor).applyMatrix4(selected.matrixWorld).project(camera);
+    const onScreen = calloutPoint.z > -1 && calloutPoint.z < 1 && Math.abs(calloutPoint.x) < 1.3 && Math.abs(calloutPoint.y) < 1.3;
+    item.group.style.display = onScreen ? '' : 'none';
+    item.button.hidden = !onScreen;
+    if (!onScreen) return;
+    const px = (calloutPoint.x * .5 + .5) * state.width;
+    const py = (-calloutPoint.y * .5 + .5) * state.height;
+    const labelY = THREE.MathUtils.clamp(py, 100, state.height - 26);
+    const left = item.side === 'left';
+    const x = left ? (mobile ? 12 : 48) : state.width - width - (mobile ? 12 : 48);
+    const end = left ? x + width : x;
+    const elbow = end + (left ? 22 : -22);
     $('callout-lines').setAttribute('viewBox', `0 0 ${state.width} ${state.height}`);
-    for (const item of callouts) {
-      point.copy(item.anchor); item.mesh.localToWorld(point); point.project(camera);
-      const onScreen = point.z > -1 && point.z < 1 && Math.abs(point.x) < 1.3 && Math.abs(point.y) < 1.3;
-      item.group.style.display = onScreen ? '' : 'none';
-      item.button.hidden = !onScreen;
-      if (!onScreen) continue;
-      item.x = (point.x * 0.5 + 0.5) * state.width;
-      item.y = (-point.y * 0.5 + 0.5) * state.height;
-      item.labelY = item.y;
-      const alpha = THREE.MathUtils.clamp((state.amount - item.index * 0.025) * 3, 0, 1) * (state.selected && state.selected !== item.mesh ? 0.2 : 1);
-      item.group.style.opacity = String(alpha);
-      item.button.style.opacity = String(alpha);
-      item.button.classList.toggle('selected', state.selected === item.mesh);
-      item.button.disabled = state.amount < 1 || !!state.transition;
-      item.button.style.width = `${width}px`;
-      layout[item.side].push(item);
-    }
-    for (const side of ['left', 'right']) {
-      const items = layout[side].sort((a,b) => a.y - b.y);
-      const minY = state.selected ? 92 : (mobile || side === 'left' ? introBottom : 45);
-      const maxY = state.height - 26;
-      const gap = mobile ? 35 : 43;
-      for (let i = 0; i < items.length; i++) items[i].labelY = Math.max(minY + i * gap, items[i].labelY, i ? items[i-1].labelY + gap : minY);
-      if (items.length && items.at(-1).labelY > maxY) {
-        items.at(-1).labelY = maxY;
-        for (let i = items.length - 2; i >= 0; i--) items[i].labelY = Math.min(items[i].labelY, items[i+1].labelY - gap);
-      }
-      for (const item of items) {
-        const x = side === 'left' ? leftX : rightX;
-        const end = side === 'left' ? x + width : x;
-        const elbow = end + (side === 'left' ? 22 : -22);
-        item.button.style.transform = `translate(${x}px,${item.labelY - 15}px)`;
-        item.line.setAttribute('d', `M${item.x.toFixed(1)},${item.y.toFixed(1)} L${elbow},${item.labelY.toFixed(1)} L${end},${item.labelY.toFixed(1)}`);
-        item.dot.setAttribute('cx', item.x.toFixed(1)); item.dot.setAttribute('cy', item.y.toFixed(1));
-      }
-    }
+    item.button.disabled = false;
+    item.button.classList.add('selected');
+    item.button.style.width = `${width}px`;
+    item.button.style.transform = `translate(${x}px,${labelY - 15}px)`;
+    item.line.setAttribute('d', `M${px.toFixed(1)},${py.toFixed(1)} L${elbow},${labelY.toFixed(1)} L${end},${labelY.toFixed(1)}`);
+    item.dot.setAttribute('cx', px.toFixed(1)); item.dot.setAttribute('cy', py.toFixed(1));
   }
   function rotate(angle) {
     coast = null;
@@ -453,23 +459,39 @@ async function init() {
   }
   $('back-overview').addEventListener('click', () => { clearFocus(); fitView(true); $('announcement').textContent = '已返回爆炸图，鞋子保持展开。'; });
   $('reset').addEventListener('click', () => {
-    if (!state.ready) return;
+    if (!state.ready || state.printing || state.resetting) return;
+    const poses = captureAssemblyLayout(meshes);
     clearFocus();
-    rotationTween = null;
-    moveTo(0);
+    coast = null; rotationTween = null;
+    state.target = 0;
     const newTarget = preferredTarget(0);
     const newPosition = originalDirection.clone().multiplyScalar(fitDistance(0)).add(newTarget);
-    if (reduceMotion) { controls.target.copy(newTarget); camera.position.copy(newPosition); controls.update(); }
-    else fitTween = { start: performance.now(), fromPos: camera.position.clone(), toPos: newPosition, fromTarget: controls.target.clone(), toTarget: newTarget, duration: 2400 };
-    $('announcement').textContent = '正在复位鞋子。';
+    if (reduceMotion) {
+      state.transition = null; fitTween = null; setAmount(0);
+      controls.target.copy(newTarget); camera.position.copy(newPosition); controls.update();
+      $('announcement').textContent = '鞋子已完整合拢。';
+      return;
+    }
+    state.resetting = true; state.resetProgress = 0;
+    state.transition = { rebuild: true, poses, elapsed: 0, from: state.amount, to: 0, duration: RESET_GROW_MS };
+    focusNoise.beginAssembly();
+    fitTween = { rebuild: true, fromPos: camera.position.clone(), toPos: newPosition, fromTarget: controls.target.clone(), toTarget: newTarget };
+    $('reset').disabled = true;
+    document.body.dataset.reassembling = 'true';
+    document.body.dataset.resetProgress = '0';
+    document.querySelector('.intro p').textContent = '所有零件正在同步成型，并汇聚成完整鞋体。';
+    $('announcement').textContent = '所有零件正在同步噪波成型并归位。';
+    updateUI(); renderDirty = true;
   });
 
   function hitTest(x, y) {
     const rect = canvas.getBoundingClientRect();
     ndc.set((x - rect.left) / rect.width * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
-    scene.updateMatrixWorld(true);
     raycaster.setFromCamera(ndc, camera);
-    return raycaster.intersectObjects(meshes, false)[0];
+    const start = import.meta.env.DEV ? performance.now() : 0;
+    const hit = partPicker?.pick(raycaster);
+    if (import.meta.env.DEV) document.body.dataset.pickMs = (performance.now() - start).toFixed(3);
+    return hit;
   }
   controls.addEventListener('start', () => {
     fitTween = null; rotationTween = null; coast = null;
@@ -515,7 +537,7 @@ async function init() {
         coast = dragVelocity.clone().multiplyScalar(0.45);
       }
       pointer = null; canvas.classList.remove('dragging');
-      if (clicked) {
+      if (clicked && state.ready && !state.printing && !state.resetting && !state.transition) {
         const hit = hitTest(e.clientX, e.clientY);
         if (hit) { if (state.amount === 0) expand(); else focusPart(hit.object); }
       }
@@ -556,8 +578,11 @@ async function init() {
     if (document.hidden || introCompiling) { lastIntroFrame = now; lastFocusFrame = now; frameBudget = 0; return; }
     // Carry fractional frame time forward; a strict 16.667 ms gate drops 60 Hz frames.
     frameBudget = Math.min(frameBudget + rafDelta, 1000 / 30);
-    if (!downPointers.size && !coast && frameBudget < 1000 / 60 - 0.75) return;
+    // Keep only the newest input for the next frame. Uncapped 120/144 Hz drags
+    // otherwise enqueue extra GPU work and make the camera feel behind the hand.
+    if (frameBudget < 1000 / 60 - 0.75) return;
     frameBudget = Math.max(0, frameBudget - 1000 / 60);
+    const frameDelta = lastFocusFrame ? now - lastFocusFrame : rafDelta;
     if (printIntro) {
       while (gpuQueries.length && benchGL.getQueryParameter(gpuQueries[0], benchGL.QUERY_RESULT_AVAILABLE)) {
         const query = gpuQueries.shift();
@@ -590,12 +615,34 @@ async function init() {
     }
     if (state.transition) {
       const t = state.transition;
-      const p = Math.min(1, (now - t.start) / t.duration);
-      setAmount(THREE.MathUtils.lerp(t.from, t.to, p));
-      if (p === 1) { state.transition = null; setAmount(state.target); $('announcement').textContent = state.target === 0 ? '鞋子已完整合拢。' : '结构已展开，可左右拖动查看。'; }
+      if (t.rebuild) {
+        t.elapsed += Math.min(64, lastFocusFrame ? now - lastFocusFrame : rafDelta);
+        const p = Math.min(1, t.elapsed / t.duration);
+        state.resetProgress = p;
+        applyAssemblyLayout(t.poses, p);
+        state.amount = t.from * (1 - THREE.MathUtils.smoothstep(p, 0, 1));
+        focusNoise.setAssemblyProgress(p);
+        const resetPercent = String(Math.round(p * 100));
+        const resetStage = p < .3 ? 'start' : p < .8 ? 'middle' : 'end';
+        if (document.body.dataset.resetProgress !== resetPercent) document.body.dataset.resetProgress = resetPercent;
+        if (document.body.dataset.resetStage !== resetStage) document.body.dataset.resetStage = resetStage;
+        updateUI(); renderDirty = true;
+        if (p === 1) {
+          state.transition = null; state.resetting = false; setAmount(0);
+          $('reset').disabled = false;
+          document.body.dataset.reassembling = 'false';
+          document.body.dataset.resetStage = 'complete';
+          document.querySelector('.intro p').textContent = '点击鞋身展开，探索零件之间的关系。';
+          $('announcement').textContent = '所有零件已成型并归位，鞋子已完整合拢。';
+        }
+      } else {
+        const p = Math.min(1, (now - t.start) / t.duration);
+        setAmount(THREE.MathUtils.lerp(t.from, t.to, p));
+        if (p === 1) { state.transition = null; setAmount(state.target); $('announcement').textContent = state.target === 0 ? '鞋子已完整合拢。' : '结构已展开，可左右拖动查看。'; }
+      }
     }
     if (fitTween) {
-      const t = fitTween, p = Math.min(1, (now - t.start) / (t.duration || 1600));
+      const t = fitTween, p = t.rebuild ? state.resetProgress : Math.min(1, (now - t.start) / (t.duration || 1600));
       camera.position.lerpVectors(t.fromPos, t.toPos, ease(p));
       controls.target.lerpVectors(t.fromTarget, t.toTarget, ease(p));
       renderDirty = true;
@@ -608,7 +655,7 @@ async function init() {
       if (p === 1) rotationTween = null;
     }
     if (coast) {
-      const dt = Math.min(0.05, rafDelta / 1000);
+      const dt = Math.min(0.05, frameDelta / 1000);
       dragSphere.setFromVector3(dragOffset.copy(camera.position).sub(controls.target));
       dragSphere.theta += coast.x * dt;
       dragSphere.phi = THREE.MathUtils.clamp(dragSphere.phi + coast.y * dt, controls.minPolarAngle, controls.maxPolarAngle);
@@ -617,15 +664,24 @@ async function init() {
       if (coast.lengthSq() < 0.0004) coast = null;
       renderDirty = true;
     }
-    const moving = !!(downPointers.size || coast || state.transition || fitTween || rotationTween);
+    // Inspection freezes this pose for reliable close-ups; returning resumes it.
+    const orbiting = state.ready && !reduceMotion && !state.printing && !state.selected && !state.transition && state.amount === 1;
+    if (orbiting) {
+      constellationTime += Math.min(64, lastFocusFrame ? now - lastFocusFrame : rafDelta) / 1000;
+      for (const mesh of meshes) applyExplodeLayout(mesh, 1, constellationTime);
+      renderDirty = true;
+    }
+    const moving = !!(downPointers.size || coast || state.transition || fitTween || rotationTween || orbiting);
     if (moving) lastMotionTime = now;
+    if (!state.printing && renderBudget.update(now, lastFocusFrame ? now - lastFocusFrame : rafDelta,
+        moving || !!focusNoise?.forming, moving || (!!state.selected && !reduceMotion) || !!focusNoise?.forming)) renderDirty = true;
     if (!state.printing && quality?.setMoving(moving || now - lastMotionTime < 160 || !!focusNoise?.forming, state.selected, highDetail)) renderDirty = true;
     controls.update();
     const annotationsDirty = renderDirty;
     const wasForming = focusNoise?.forming;
     // RAF may run at 120/144 Hz while we draw at 60. Include skipped RAF time
     // so the 5.4-second print never becomes slower on a high-refresh display.
-    const focusDelta = lastFocusFrame ? now - lastFocusFrame : rafDelta;
+    const focusDelta = frameDelta;
     lastFocusFrame = now;
     if (focusNoise?.update(focusDelta, state.height, renderer.getPixelRatio())) renderDirty = true;
     if (wasForming && !focusNoise.forming && state.selected) $('announcement').textContent = `${state.selected.userData.label}已成型，可以拖动查看细节。`;
@@ -665,7 +721,11 @@ async function init() {
           }
         }
       }
-      if (import.meta.env.DEV) {
+      if (import.meta.env.DEV && now - lastDiagnosticsTime > 120) {
+        lastDiagnosticsTime = now;
+        document.body.dataset.pixelRatio = String(renderer.getPixelRatio());
+        document.body.dataset.budgetTier = String(renderBudget.tier);
+        document.body.dataset.drawnPoints = String(renderer.info.render.points);
         document.body.dataset.renderCount = String(renderCount);
         document.body.dataset.triangles = String(renderer.info.render.triangles);
         document.body.dataset.renderQuality = quality?.moving ? 'motion' : 'detail';
@@ -673,9 +733,14 @@ async function init() {
         document.body.dataset.coasting = String(!!coast);
         document.body.dataset.focusNoisePoints = String(focusNoise?.count || 0);
         document.body.dataset.focusNoiseTime = (focusNoise?.time || 0).toFixed(3);
+        document.body.dataset.orbitTime = constellationTime.toFixed(3);
+        document.body.dataset.orbiting = String(orbiting);
         document.body.dataset.focusFormation = String(Math.round((focusNoise?.progress ?? 1) * 100));
         document.body.dataset.focusFormationDuration = String(focusNoise?.durationMs || 0);
         document.body.dataset.focusFormationStage = !focusNoise?.forming ? 'complete' : focusNoise.progress < 0.3 ? 'start' : focusNoise.progress < 0.8 ? 'middle' : 'end';
+        document.body.dataset.focusDissolving = String(focusNoise?.dissolvingCount || 0);
+        document.body.dataset.focusDissolveDuration = String(focusNoise?.dissolveDurationMs || 0);
+        document.body.dataset.focusDissolveStage = !focusNoise?.dissolvingCount ? 'complete' : focusNoise.dissolveProgress < 0.35 ? 'start' : focusNoise.dissolveProgress < 0.8 ? 'middle' : 'end';
         document.body.dataset.solidParts = String(meshes.filter(mesh => mesh.visible).length);
         if (state.selected) document.body.dataset.selectedTriangles = String(state.selected.geometry.index.count / 3);
       }
@@ -694,9 +759,8 @@ async function init() {
       if (!object.isMesh) return;
       const part = PARTS[object.userData.part_id];
       if (!part) throw new Error(`Unknown part: ${object.name}`);
-      object.userData.basePosition = object.position.clone();
-      object.userData.explodeOffset = new THREE.Vector3(...part.offset);
-      object.userData.phase = part.phase;
+      object.updateMatrix();
+      prepareExplodeLayout(object, part);
       object.userData.label = part.label;
       object.material = object.material.clone();
       object.userData.originalOpacity = object.material.opacity;
@@ -713,9 +777,11 @@ async function init() {
       meshes.push(object);
     });
     if (meshes.length !== 10) throw new Error('The source assembly must contain ten parts.');
+    configureExplodeOrbit(meshes);
     meshes.forEach(createCallout);
     introCompiling = true;
     quality = createRenderQuality(scene, meshes, await introGeometryPromise);
+    partPicker = await createPartPicker(meshes);
     const focusSamples = await focusSamplesPromise;
     if (!focusSamples) throw new Error('Focus particle data could not load.');
     focusNoise = createFocusNoise(scene, meshes, focusSamples, { mobile: state.width <= 600, reduceMotion, materialsFor: quality.materialsFor });
@@ -740,5 +806,5 @@ async function init() {
     console.error('Model loading failed:', error);
     showError('加载失败，请检查网络连接并重新加载。也可以使用交付文件夹里的启动脚本打开网站。');
   }
-  if (import.meta.hot) import.meta.hot.dispose(() => { disposed = true; printIntro?.dispose(); focusNoise?.dispose(); quality?.dispose(); controls.dispose(); renderer.dispose(); });
+  if (import.meta.hot) import.meta.hot.dispose(() => { disposed = true; partPicker?.dispose(); printIntro?.dispose(); focusNoise?.dispose(); quality?.dispose(); controls.dispose(); renderer.dispose(); });
 }

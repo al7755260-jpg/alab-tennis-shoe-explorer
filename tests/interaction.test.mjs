@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as THREE from 'three';
+import { createPartPicker } from '../src/part-picker.js';
+import { createRenderBudget } from '../src/render-budget.js';
+
+test('picking follows transformed, hidden parts and stays independent of visual LOD', async () => {
+  const scene = new THREE.Scene();
+  const geometry = new THREE.SphereGeometry(1, 48, 32);
+  const material = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+  const a = new THREE.Mesh(geometry, material);
+  const b = new THREE.Mesh(geometry.clone(), material);
+  a.userData.previewGeometry = a.geometry;
+  b.userData.previewGeometry = b.geometry;
+  b.position.z = -4;
+  scene.add(a, b); scene.updateMatrixWorld(true);
+  const indices = geometry.index.array.slice();
+  const picker = await createPartPicker([a,b], async () => {});
+  const ray = new THREE.Raycaster(new THREE.Vector3(0,0,5), new THREE.Vector3(0,0,-1));
+  assert.equal(picker.pick(ray).object, a);
+  assert.deepEqual(geometry.index.array, indices);
+  a.visible = false;
+  a.geometry = new THREE.BoxGeometry(.01,.01,.01);
+  assert.ok(Math.abs(picker.pick(ray).distance - 4) < 1e-6);
+  a.position.x = 4; a.rotation.y = .7;
+  assert.equal(picker.pick(ray).object, b);
+  ray.ray.origin.x = 4;
+  assert.equal(picker.pick(ray).object, a);
+  assert.equal(ray.firstHitOnly, undefined);
+  picker.dispose();
+  assert.equal(geometry.boundsTree, null);
+  a.geometry.dispose(); b.geometry.dispose(); geometry.dispose(); material.dispose();
+});
+
+test('short pauses between drags do not repeatedly resize the GPU buffer', () => {
+  let ratio = 1, allocations = 0;
+  const budget = createRenderBudget({ getPixelRatio: () => ratio, setPixelRatio: x => { ratio=x; allocations++; } });
+  budget.resize(1280,720);
+  budget.update(0,16,true,true);
+  assert.equal(ratio,.85);
+  budget.update(100,16,false,false);
+  budget.update(250,16,true,true);
+  budget.update(300,16,false,false);
+  budget.update(600,16,false,false);
+  assert.equal(ratio,.85);
+  assert.equal(allocations,1);
+  budget.update(1000,16,false,false);
+  assert.equal(ratio,1);
+  assert.equal(allocations,2);
+});

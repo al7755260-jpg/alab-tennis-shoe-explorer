@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { installPrintReveal, printParticleFlow, PRINT_DURATION_MS } from './print-effect.js';
+import { installPrintReveal, printParticleFlow, printWarpStrength, PRINT_WARP_BOUND, PRINT_DURATION_MS } from './print-effect.js';
 
 // Baked from the original shoe surface: no triangle walk or random sampling at startup.
 const sampleCache = new Map();
@@ -26,13 +26,15 @@ const motion = printParticleFlow + /* glsl */`
 uniform float uTime;
 uniform float uFront;
 uniform float uFade;
+uniform float uPrintWarp;
 attribute vec3 aTarget;
 attribute vec3 aNormal;
 attribute float aSeed;
 varying float vAlpha;
 varying vec3 vTint;
 vec3 particlePosition(float tail) {
-  return printParticle(aTarget, aNormal, aSeed, tail, uTime, uFront, uFade, 1.0, vAlpha, vTint);
+  float ahead = printAhead(aTarget, uFront, uTime, 1.0, uPrintWarp);
+  return printParticle(aTarget, aNormal, aSeed, tail, uTime, ahead, uFade, 1.0, vAlpha, vTint);
 }
 `;
 
@@ -63,6 +65,7 @@ export function createPrintIntro(scene, meshes, { mobile = false, samples, intro
     uTime: { value: 0 },
     uFront: { value: box.min.y - 0.3 },
     uFade: { value: 0 },
+    uPrintWarp: { value: 0 },
     uPointScale: { value: 700 },
   };
 
@@ -194,12 +197,14 @@ export function createPrintIntro(scene, meshes, { mobile = false, samples, intro
       const progress = fixedProgress ?? Math.min(1, elapsed / duration);
       uniforms.uTime.value = progress * duration / 1000;
       uniforms.uFront.value = THREE.MathUtils.lerp(box.min.y - 0.3, box.max.y + 0.25, progress);
+      uniforms.uPrintWarp.value = printWarpStrength(progress);
       uniforms.uFade.value = THREE.MathUtils.smoothstep(progress, 0, 0.08) * (1 - THREE.MathUtils.smoothstep(progress, 0.91, 1));
       uniforms.uPointScale.value = viewportHeight * pixelRatio;
-      const first = lowerBound(uniforms.uFront.value - 0.12);
-      const last = lowerBound(uniforms.uFront.value + 1.85);
+      const warp = PRINT_WARP_BOUND * uniforms.uPrintWarp.value;
+      const first = lowerBound(uniforms.uFront.value - 0.12 - warp);
+      const last = lowerBound(uniforms.uFront.value + 1.85 + warp);
       pointsGeometry.setDrawRange(first, last - first);
-      for (const item of meshBounds) item.mesh.visible = item.visible && item.minY <= uniforms.uFront.value;
+      for (const item of meshBounds) item.mesh.visible = item.visible && item.minY <= uniforms.uFront.value + warp;
       return progress;
     },
     dispose() {

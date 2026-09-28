@@ -38,7 +38,6 @@ export function createRenderQuality(scene, meshes, motionGeometries) {
         // Keep original color, roughness, IOR and full geometry; use studio reflections.
         material.transmission = 0;
       }
-      material.needsUpdate = true;
     }
   }
 

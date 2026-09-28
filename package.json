@@ -4,11 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "build:pages": "vite build && node publish-build.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
-  "dependencies": { "three": "0.180.0" },
-  "devDependencies": { "vite": "7.1.7" }
+  "dependencies": {
+    "three": "0.180.0",
+    "three-mesh-bvh": "0.9.15"
+  },
+  "devDependencies": {
+    "vite": "7.1.7"
+  }
 }
