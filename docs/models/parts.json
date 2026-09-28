@@ -1,0 +1,65 @@
+{
+  "sourceFile": "3d打印网球鞋 单只鞋.blend",
+  "parts": [
+    {
+      "id": "part_01",
+      "sourceName": "01 · 中底网格",
+      "vertices": 103334,
+      "faces": 74085
+    },
+    {
+      "id": "part_02",
+      "sourceName": "02 · upperPart.001",
+      "vertices": 152396,
+      "faces": 135373
+    },
+    {
+      "id": "part_03",
+      "sourceName": "03 · Plane.010",
+      "vertices": 47076,
+      "faces": 42199
+    },
+    {
+      "id": "part_04",
+      "sourceName": "04 · Plane.013",
+      "vertices": 7042,
+      "faces": 7040
+    },
+    {
+      "id": "part_05",
+      "sourceName": "05 · Plane.001",
+      "vertices": 84705,
+      "faces": 84384
+    },
+    {
+      "id": "part_06",
+      "sourceName": "06 · upperPart.004",
+      "vertices": 15420,
+      "faces": 17438
+    },
+    {
+      "id": "part_07",
+      "sourceName": "07 · upperPart.002",
+      "vertices": 12198,
+      "faces": 13265
+    },
+    {
+      "id": "part_08",
+      "sourceName": "08 · Plane.005",
+      "vertices": 183298,
+      "faces": 183296
+    },
+    {
+      "id": "part_10",
+      "sourceName": "10 · Curve.005",
+      "vertices": 902,
+      "faces": 1333
+    },
+    {
+      "id": "part_11",
+      "sourceName": "11 · Curve.001",
+      "vertices": 7674,
+      "faces": 11399
+    }
+  ]
+}

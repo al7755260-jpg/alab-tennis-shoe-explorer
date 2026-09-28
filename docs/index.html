@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07090c" />
+    <meta name="description" content="点击展开 3D 打印网球鞋，左右拖动，探索每一处构造。" />
+    <title>安踏集团多维敏捷网球鞋 — Powered by ALAB</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23254934'/%3E%3Cpath d='M20 46V18h26M20 30h20' fill='none' stroke='%23f1f2ef' stroke-width='6'/%3E%3C/svg%3E" />
+    <script type="module" crossorigin src="./assets/index-BIAJDyRm.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Bli04KHa.css">
+  </head>
+  <body>
+    <div id="app">
+      <header class="header">
+        <div class="wordmark" aria-label="Powered by ALAB"><span>Powered by</span> <strong>ALAB</strong></div>
+        <div class="header-right"><span>网球鞋 · 结构探索</span><button id="replay-intro" class="replay-button" title="重新播放粒子成型动画">重播成型</button><button id="reset" class="icon-button reset-button" aria-label="复位鞋子" title="合拢鞋子并恢复默认视角"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5M20 12l-3-5"/></svg><span>复位</span></button></div>
+      </header>
+      <main id="stage" aria-label="网球鞋三维展示">
+        <div id="canvas-wrap"></div>
+        <div class="intro"><h1>安踏集团<br />多维敏捷网球鞋</h1><p>点击鞋身展开，探索零件之间的关系。</p></div>
+        <div id="print-status" hidden><span class="print-indicator"></span><span>逐层成型 <span id="print-progress">0%</span></span><button id="skip-intro">跳过动画</button></div>
+        <aside id="inspection" hidden aria-label="零件特写"><button id="back-overview"><svg viewBox="0 0 24 24"><path d="m10 5-7 7 7 7M3 12h18"/></svg>返回爆炸图</button></aside>
+        <div id="callouts" aria-label="零件名称"><svg id="callout-lines" aria-hidden="true"></svg><div id="callout-labels"></div></div>
+        <div id="loading" role="status"><span class="loader-ring"></span><span id="loading-text">正在准备模型</span><div class="load-track"><i id="load-progress"></i></div></div>
+        <div id="error" role="alert" hidden><strong>模型暂时无法打开</strong><p id="error-detail"></p><button id="retry">重新加载</button></div>
+        <div id="part-label" aria-hidden="true"></div>
+      </main>
+      <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>
